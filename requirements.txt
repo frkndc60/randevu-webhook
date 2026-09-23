@@ -1,2 +1,4 @@
-fastapi
-uvicorn
+   fastapi
+   uvicorn
+   httpx
+   firebase-admin
