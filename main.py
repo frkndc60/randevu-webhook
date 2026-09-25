@@ -52,7 +52,6 @@ TEMPLATE_KEYS = [
     "maxDurationSeconds",
     "backgroundSound",
     "backgroundDenoisingEnabled",
-    "firstMessageMode",
     "startSpeakingPlan",
     "stopSpeakingPlan",
 ]
@@ -172,7 +171,8 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
     if not d.businessName.strip():
         raise HTTPException(400, "İşletme adı boş olamaz.")
     voice = VOICES[voice_key]
-    assistant_name = d.assistantName.strip()[:30] or voice["name"]
+    # Asistanın adı her zaman seçilen sesin adıdır (Yunus / Nergis / Yağmur)
+    assistant_name = voice["name"]
 
     user_ref = db.collection("users").document(uid)
     user = (user_ref.get().to_dict() or {})
@@ -194,9 +194,12 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
     body["model"] = model_cfg
 
     body["name"] = f"SesAI - {d.businessName}"[:40]
-    body["firstMessage"] = d.greeting.strip() or (
+    # Karşılama cümlesi otomatik: işletme adı + seçilen sesin adı
+    body["firstMessage"] = (
         f"Merhaba, {d.businessName}, hoş geldiniz! Ben {assistant_name}. Size nasıl yardımcı olabilirim?"
     )
+    # Asistan her zaman önce konuşsun ve SADECE bizim karşılama cümlemizi söylesin
+    body["firstMessageMode"] = "assistant-speaks-first"
     body["metadata"] = {"uid": uid}
 
     if existing_id:
