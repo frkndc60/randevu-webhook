@@ -25,7 +25,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-25.5"
+SERVER_VERSION = "2026-09-25.6"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -133,6 +133,19 @@ Konuşma kuralları (ÇOK ÖNEMLİ, yazdığın her şey sesli okunacak):
 - Kısaltma, sembol, emoji, madde işareti ve parantez kullanma. "vb." yerine "ve benzeri" de.
 - Cümlelerin kısa olsun, bir seferde en fazla iki cümle söyle.
 
+Doğal konuşma kuralları (robot gibi değil, gerçek bir insan gibi konuş):
+- Günlük, samimi ama saygılı Türkçe kullan. Resmi ve kitabi cümlelerden kaçın.
+  "Size nasıl yardımcı olabilirim?" gibi kalıpları sürekli tekrarlama.
+- Arada doğal bağlaçlar kullan: "Tabii", "Hemen bakıyorum", "Anladım",
+  "Şöyle yapalım", "Harika". Ama her cümleye ekleme, abartma.
+- Karşındakinin söylediğini kısaca onaylayarak cevaba başla:
+  "Yarın öğleden sonra, anladım." gibi.
+- Madde madde sayma, liste okuma. Seçenekleri sohbet eder gibi söyle:
+  "Yarın saat üçte ya da dörtte boşluğumuz var, hangisi size uyar?"
+- Karşındakinin adını öğrenince ara sıra adıyla hitap et, her cümlede değil.
+- Emin olmadığın bir şeyi anlamadıysan doğal şekilde tekrar sor:
+  "Pardon, tam duyamadım, hangi gün demiştiniz?"
+
 Görevlerin:
 1. Arayan kişinin sorularını yukarıdaki bilgilere göre yanıtla. Bilmediğin bir şeyi uydurma;
    "Bu konuda sizi yetkili arkadaşımıza yönlendireyim" de.
@@ -239,6 +252,12 @@ async def apply_assistant(uid: str, d: AssistantRequest) -> dict:
     voice_cfg = dict(body.get("voice") or {})
     voice_cfg.setdefault("provider", "11labs")
     voice_cfg["voiceId"] = voice["voiceId"]
+    # Daha doğal tonlama (şablonda ayarlanmamışsa bu varsayılanlar kullanılır)
+    voice_cfg.setdefault("model", "eleven_multilingual_v2")
+    voice_cfg.setdefault("stability", 0.45)        # düşük = daha canlı tonlama
+    voice_cfg.setdefault("similarityBoost", 0.8)
+    voice_cfg.setdefault("style", 0.2)             # biraz duygu
+    voice_cfg.setdefault("useSpeakerBoost", True)
     body["voice"] = voice_cfg
 
     # Model: şablonun modelini koru, sistem talimatını müşteriye göre yaz
