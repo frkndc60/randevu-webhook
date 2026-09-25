@@ -105,12 +105,20 @@ async def vapi(method: str, path: str, body: dict | None = None) -> dict:
     return r.json() if r.text else {}
 
 
+def speakable(text: str) -> str:
+    """Sesli okunacak metinden sembolleri temizler (& -> ve vb.)."""
+    repl = {"&": " ve ", "+": " artı ", "%": " yüzde ", "@": " at ", "/": " ", "#": " ", "_": " ", "*": " "}
+    for k, v in repl.items():
+        text = text.replace(k, v)
+    return " ".join(text.split())
+
+
 def build_system_prompt(d: "AssistantRequest", voice_name: str) -> str:
-    return f"""Sen "{d.businessName}" işletmesinin telefon asistanısın. Adın {voice_name}.
+    return f"""Sen "{speakable(d.businessName)}" işletmesinin telefon asistanısın. Adın {voice_name}.
 Her zaman Türkçe, kibar, kısa ve doğal cümlelerle konuş.
 
 İşletme bilgileri:
-- İşletme adı: {d.businessName}
+- İşletme adı: {speakable(d.businessName)}
 - Sektör: {d.sector or "Belirtilmedi"}
 - Hizmetler: {d.services or "Belirtilmedi"}
 - Çalışma saatleri: {d.workingHours or "Belirtilmedi"}
@@ -196,7 +204,7 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
     body["name"] = f"SesAI - {d.businessName}"[:40]
     # Karşılama cümlesi otomatik: işletme adı + seçilen sesin adı
     body["firstMessage"] = (
-        f"Merhaba, {d.businessName}, hoş geldiniz! Ben {assistant_name}. Size nasıl yardımcı olabilirim?"
+        f"Merhaba, {speakable(d.businessName)}, hoş geldiniz! Ben {assistant_name}. Size nasıl yardımcı olabilirim?"
     )
     # Asistan her zaman önce konuşsun ve SADECE bizim karşılama cümlemizi söylesin
     body["firstMessageMode"] = "assistant-speaks-first"
