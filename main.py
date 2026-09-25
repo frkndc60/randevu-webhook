@@ -20,12 +20,13 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from firebase_admin import auth as fb_auth
 from firebase_admin import credentials, firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-25.6"
+SERVER_VERSION = "2026-09-26.2"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -40,6 +41,35 @@ VOICES = {
 }
 
 # Şablon asistandan kopyalanacak ayarlar (model, transcriber, araçlar vb.)
+WEBHOOK_URL = "https://randevu-webhook.onrender.com/api/vapi/webhook"
+
+# Randevu aracı: sunucu kendisi tanımlar (Vapi'deki eski araç kullanılmaz)
+BOOK_TOOL = {
+    "type": "function",
+    "async": False,
+    "function": {
+        "name": "randevu_olustur",
+        "description": "Müşteri için randevu oluşturur. Müşterinin adını, randevu gününü, saatini ve "
+                       "istediği hizmeti öğrendikten SONRA çağır.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "customerName": {"type": "string", "description": "Müşterinin adı ve soyadı"},
+                "date": {"type": "string", "description": "Randevu günü, müşterinin söylediği gibi (ör. yarın, 27 Eylül, cuma)"},
+                "time": {"type": "string", "description": "Randevu saati (ör. 15:00, öğleden sonra üç)"},
+                "service": {"type": "string", "description": "İstenen hizmet (ör. saç kesimi)"},
+                "phone": {"type": "string", "description": "Müşterinin telefon numarası, verdiyse"},
+            },
+            "required": ["customerName", "date", "time"],
+        },
+    },
+    "server": {"url": WEBHOOK_URL},
+    "messages": [
+        {"type": "request-start", "content": "Hemen kaydınızı oluşturuyorum."},
+        {"type": "request-failed", "content": "Kusura bakmayın, sistemde küçük bir sorun oldu, bir daha deneyeyim."},
+    ],
+}
+
 TEMPLATE_KEYS = [
     "transcriber",
     "model",
@@ -143,6 +173,12 @@ Doğal konuşma kuralları (robot gibi değil, gerçek bir insan gibi konuş):
 - Madde madde sayma, liste okuma. Seçenekleri sohbet eder gibi söyle:
   "Yarın saat üçte ya da dörtte boşluğumuz var, hangisi size uyar?"
 - Karşındakinin adını öğrenince ara sıra adıyla hitap et, her cümlede değil.
+- Müşteriye ASLA emir kipiyle konuşma ("bekleyin", "söyleyin", "tekrarlayın" gibi).
+  Her zaman kibar rica ya da kendi eylemini anlatan cümle kur:
+  "Bir saniye bekleyin" yerine "Hemen bakıyorum" veya "Bir saniye rica edeceğim",
+  "Adınızı söyleyin" yerine "Adınızı alabilir miyim?",
+  "Tekrar edin" yerine "Bir daha söyler misiniz?"
+- Randevu kaydederken sessiz kalma, "Hemen kaydınızı oluşturuyorum" de.
 - Emin olmadığın bir şeyi anlamadıysan doğal şekilde tekrar sor:
   "Pardon, tam duyamadım, hangi gün demiştiniz?"
 
@@ -151,7 +187,9 @@ Görevlerin:
    "Bu konuda sizi yetkili arkadaşımıza yönlendireyim" de.
 2. Randevu isteyen kişiden adını, istediği hizmeti, günü ve saati al.
    Çalışma saatleri dışındaki bir saati önerme.
-3. Bilgiler tamamlanınca randevu oluşturma aracını kullan ve sonucu arayana bildir.
+3. Adı, günü, saati ve hizmeti öğrenince "randevu_olustur" aracını çağır.
+   Müşterinin söylediği günü ve saati araca AYNEN ilet, bu bilgileri asla boş bırakma.
+   Aracın cevabına göre müşteriye sonucu bildir.
 4. Görüşmeyi nazikçe sonlandır."""
 
 
@@ -252,17 +290,19 @@ async def apply_assistant(uid: str, d: AssistantRequest) -> dict:
     voice_cfg = dict(body.get("voice") or {})
     voice_cfg.setdefault("provider", "11labs")
     voice_cfg["voiceId"] = voice["voiceId"]
-    # Daha doğal tonlama (şablonda ayarlanmamışsa bu varsayılanlar kullanılır)
-    voice_cfg.setdefault("model", "eleven_multilingual_v2")
-    voice_cfg.setdefault("stability", 0.45)        # düşük = daha canlı tonlama
-    voice_cfg.setdefault("similarityBoost", 0.8)
-    voice_cfg.setdefault("style", 0.2)             # biraz duygu
-    voice_cfg.setdefault("useSpeakerBoost", True)
+    # Dengeli tonlama: kelime sonlarını uzatmasın, net ve akıcı konuşsun
+    voice_cfg["model"] = "eleven_turbo_v2_5"  # Turkcede daha akici, kelime sonlarini uzatmiyor
+    voice_cfg["stability"] = 0.65       # yüksek = daha kararlı, uzatma/titreme az
+    voice_cfg["similarityBoost"] = 0.8
+    voice_cfg["style"] = 0.0            # 0 = abartılı tonlama yok
+    voice_cfg["useSpeakerBoost"] = True
     body["voice"] = voice_cfg
 
     # Model: şablonun modelini koru, sistem talimatını müşteriye göre yaz
     model_cfg = dict(body.get("model") or {"provider": "openai", "model": "gpt-4o"})
     model_cfg["messages"] = [{"role": "system", "content": build_system_prompt(d, assistant_name)}]
+    model_cfg.pop("toolIds", None)          # şablondaki eski randevu aracını kullanma
+    model_cfg["tools"] = [BOOK_TOOL]
     body["model"] = model_cfg
 
     body["name"] = f"SesAI - {d.businessName}"[:40]
@@ -435,31 +475,54 @@ async def connect_phone(d: PhoneRequest, authorization: str | None = Header(None
 def find_uid_by_assistant(assistant_id: str | None) -> str | None:
     if not assistant_id or db is None:
         return None
-    docs = db.collection("users").where("vapiAssistantId", "==", assistant_id).limit(1).get()
+    docs = db.collection("users").where(filter=FieldFilter("vapiAssistantId", "==", assistant_id)).limit(1).get()
     return docs[0].id if docs else None
 
 
+def _pick(params: dict, *keys) -> str:
+    for k in keys:
+        v = params.get(k)
+        if isinstance(v, (str, int, float)) and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
 def save_appointment(message: dict, params: dict) -> str:
-    musteri_adi = params.get("customerName") or params.get("customer_name") or "Değerli Müşterimiz"
-    tarih = params.get("appointmentTime") or params.get("date") or "Belirtilen saatte"
-    hizmet = params.get("service") or "Randevu"
-    print(f"Yeni Randevu İsteği: {musteri_adi} - {tarih} - {hizmet}")
+    print(f"Randevu aracı parametreleri: {json.dumps(params, ensure_ascii=False)}")
+    musteri_adi = _pick(params, "customerName", "customer_name", "name", "fullName", "ad", "adSoyad", "musteri")
+    tarih = _pick(params, "appointmentTime", "appointment_time", "datetime", "dateTime", "date_time",
+                  "appointmentDate", "appointment_date", "date", "tarih")
+    saat = _pick(params, "time", "saat", "hour")
+    if saat and saat not in tarih:
+        tarih = f"{tarih} {saat}".strip()
+    hizmet = _pick(params, "service", "serviceName", "service_name", "hizmet", "islem", "reason", "notes")
+    telefon = _pick(params, "phone", "phoneNumber", "phone_number", "telefon")
+
+    eksik = [ad for ad, deger in (("müşterinin adı", musteri_adi), ("randevu günü ve saati", tarih)) if not deger]
+    if eksik:
+        print(f"Randevu eksik bilgi: {eksik}")
+        return ("Randevu henüz KAYDEDİLMEDİ çünkü şu bilgi eksik: " + ", ".join(eksik) +
+                ". Müşteriden bu bilgiyi kibarca iste, sonra randevu aracını tekrar çağır.")
 
     call = message.get("call") or {}
     assistant_id = call.get("assistantId") or (message.get("assistant") or {}).get("id")
     uid = find_uid_by_assistant(assistant_id)
+    print(f"Yeni Randevu: {musteri_adi} - {tarih} - {hizmet or '-'} (uid: {uid})")
     if uid and db is not None:
         db.collection("users").document(uid).collection("appointments").add(
             {
                 "customerName": musteri_adi,
                 "appointmentTime": tarih,
                 "service": hizmet,
+                "customerPhone": telefon,
                 "callerNumber": (call.get("customer") or {}).get("number", ""),
                 "status": "new",
                 "createdAt": now_iso(),
             }
         )
-    return f"Sayın {musteri_adi}, {tarih} için {hizmet} randevunuz başarıyla oluşturuldu."
+    return (f"Randevu başarıyla kaydedildi. Müşteri: {musteri_adi}. Zaman: {tarih}. "
+            f"Hizmet: {hizmet or 'belirtilmedi'}. Şimdi müşteriye randevusunun oluşturulduğunu "
+            f"kısa ve sıcak bir cümleyle söyle, başka bir isteği olup olmadığını sor.")
 
 
 @app.post("/api/vapi/webhook")
@@ -467,18 +530,25 @@ async def vapi_webhook(request: Request):
     data = await request.json()
     message = data.get("message", {})
     mtype = message.get("type")
+    if mtype in ("function-call", "tool-calls"):
+        print(f"Vapi webhook: {mtype}")
 
     # Eski format
     if mtype == "function-call":
         params = (message.get("functionCall") or {}).get("parameters") or {}
-        text = save_appointment(message, params)
-        return {"result": {"success": True, "message": text}}
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except ValueError:
+                params = {}
+        return {"result": save_appointment(message, params)}
 
     # Yeni format
     if mtype == "tool-calls":
         results = []
         for tc in message.get("toolCallList") or message.get("toolCalls") or []:
-            args = (tc.get("function") or {}).get("arguments") or {}
+            fn = tc.get("function") or {}
+            args = fn.get("arguments") or tc.get("arguments") or {}
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
