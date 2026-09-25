@@ -25,7 +25,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-25.3"
+SERVER_VERSION = "2026-09-25.4"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -174,7 +174,47 @@ class AssistantRequest(BaseModel):
 async def create_or_update_assistant(d: AssistantRequest, authorization: str | None = Header(None)):
     require_setup()
     uid = get_uid(authorization)
+    return await apply_assistant(uid, d)
 
+
+VOICE_ID_TO_KEY = {v["voiceId"]: k for k, v in VOICES.items()}
+
+
+def _first(*vals) -> str:
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+@app.post("/api/assistant/sync")
+async def sync_assistant(authorization: str | None = Header(None)):
+    """Uygulama sadece bunu çağırır; sunucu tüm bilgileri Firestore'dan kendisi okur."""
+    require_setup()
+    uid = get_uid(authorization)
+    user = (db.collection("users").document(uid).get().to_dict() or {})
+    cfg = user.get("assistantConfig") or {}
+    setup = user.get("setup") or user.get("setupData") or {}
+
+    voice_key = VOICE_ID_TO_KEY.get(cfg.get("elevenLabsVoiceId", ""), "")
+    if not voice_key:
+        name = _first(cfg.get("voiceName"), user.get("voice"), user.get("assistantVoice")).lower().replace("ğ", "g")
+        voice_key = next((k for k in VOICES if name.startswith(k)), "yunus")
+
+    d = AssistantRequest(
+        businessName=_first(cfg.get("businessName"), user.get("businessName"), setup.get("businessName"), "İşletmemiz"),
+        voice=voice_key,
+        sector=_first(user.get("sector"), setup.get("sector"), cfg.get("sector")),
+        services=_first(user.get("services"), setup.get("services"), cfg.get("services")),
+        workingHours=_first(user.get("workingHours"), setup.get("workingHours"), cfg.get("workingHours")),
+        extraInfo=_first(user.get("extraInfo"), setup.get("extraInfo"), cfg.get("extraInfo")),
+    )
+    result = await apply_assistant(uid, d)
+    result.update({"voice": voice_key, "businessName": d.businessName})
+    return result
+
+
+async def apply_assistant(uid: str, d: AssistantRequest) -> dict:
     voice_key = d.voice.strip().lower().replace("ğ", "g")
     if voice_key not in VOICES:
         raise HTTPException(400, "Ses seçimi geçersiz. Yunus, Nergis veya Yağmur olmalı.")
@@ -221,13 +261,16 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
         {
             "vapiAssistantId": result["id"],
             "assistantVoice": voice_key,
+            "voice": voice_key,
+            "businessName": d.businessName,
             "assistantName": assistant_name,
             "assistantStatus": "ready",
             "assistantUpdatedAt": now_iso(),
         },
         merge=True,
     )
-    return {"success": True, "assistantId": result["id"], "created": not existing_id}
+    return {"success": True, "assistantId": result["id"], "created": not existing_id,
+            "firstMessage": body["firstMessage"]}
 
 
 # ---------------------------------------------------------------------------
