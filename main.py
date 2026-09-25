@@ -153,6 +153,7 @@ def home():
 class AssistantRequest(BaseModel):
     businessName: str
     voice: str  # "yunus" | "nergis" | "yagmur"
+    assistantName: str = ""  # müşterinin verdiği asistan adı (boşsa sesin adı kullanılır)
     sector: str = ""
     services: str = ""
     workingHours: str = ""
@@ -171,6 +172,7 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
     if not d.businessName.strip():
         raise HTTPException(400, "İşletme adı boş olamaz.")
     voice = VOICES[voice_key]
+    assistant_name = d.assistantName.strip()[:30] or voice["name"]
 
     user_ref = db.collection("users").document(uid)
     user = (user_ref.get().to_dict() or {})
@@ -188,12 +190,12 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
 
     # Model: şablonun modelini koru, sistem talimatını müşteriye göre yaz
     model_cfg = dict(body.get("model") or {"provider": "openai", "model": "gpt-4o"})
-    model_cfg["messages"] = [{"role": "system", "content": build_system_prompt(d, voice["name"])}]
+    model_cfg["messages"] = [{"role": "system", "content": build_system_prompt(d, assistant_name)}]
     body["model"] = model_cfg
 
     body["name"] = f"SesAI - {d.businessName}"[:40]
     body["firstMessage"] = d.greeting.strip() or (
-        f"Merhaba, {d.businessName}, hoş geldiniz! Ben {voice['name']}. Size nasıl yardımcı olabilirim?"
+        f"Merhaba, {d.businessName}, hoş geldiniz! Ben {assistant_name}. Size nasıl yardımcı olabilirim?"
     )
     body["metadata"] = {"uid": uid}
 
@@ -206,6 +208,7 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
         {
             "vapiAssistantId": result["id"],
             "assistantVoice": voice_key,
+            "assistantName": assistant_name,
             "assistantStatus": "ready",
             "assistantUpdatedAt": now_iso(),
         },
