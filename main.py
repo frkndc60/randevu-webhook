@@ -25,7 +25,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-25.4"
+SERVER_VERSION = "2026-09-25.5"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -208,9 +208,11 @@ async def sync_assistant(authorization: str | None = Header(None)):
         services=_first(user.get("services"), setup.get("services"), cfg.get("services")),
         workingHours=_first(user.get("workingHours"), setup.get("workingHours"), cfg.get("workingHours")),
         extraInfo=_first(user.get("extraInfo"), setup.get("extraInfo"), cfg.get("extraInfo")),
+        assistantName=_first(cfg.get("name")),
+        greeting=_first(cfg.get("greetingMessage")),
     )
     result = await apply_assistant(uid, d)
-    result.update({"voice": voice_key, "businessName": d.businessName})
+    result.update({"voice": voice_key, "businessName": d.businessName, "assistantName": d.assistantName})
     return result
 
 
@@ -221,8 +223,9 @@ async def apply_assistant(uid: str, d: AssistantRequest) -> dict:
     if not d.businessName.strip():
         raise HTTPException(400, "İşletme adı boş olamaz.")
     voice = VOICES[voice_key]
-    # Asistanın adı her zaman seçilen sesin adıdır (Yunus / Nergis / Yağmur)
-    assistant_name = voice["name"]
+    # Asistanın adı: uygulamada yazılan isim; boşsa seçilen sesin adı
+    typed = d.assistantName.strip()[:30]
+    assistant_name = (typed[:1].upper() + typed[1:]) if typed else voice["name"]
 
     user_ref = db.collection("users").document(uid)
     user = (user_ref.get().to_dict() or {})
@@ -244,8 +247,8 @@ async def apply_assistant(uid: str, d: AssistantRequest) -> dict:
     body["model"] = model_cfg
 
     body["name"] = f"SesAI - {d.businessName}"[:40]
-    # Karşılama cümlesi otomatik: işletme adı + seçilen sesin adı
-    body["firstMessage"] = (
+    # Karşılama cümlesi: uygulamada yazılan cümle; boşsa otomatik
+    body["firstMessage"] = speakable(d.greeting.strip()) if d.greeting.strip() else (
         f"Merhaba, {speakable(d.businessName)}, hoş geldiniz! Ben {assistant_name}. Size nasıl yardımcı olabilirim?"
     )
     # Asistan her zaman önce konuşsun ve SADECE bizim karşılama cümlemizi söylesin
