@@ -25,6 +25,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
+SERVER_VERSION = "2026-09-25.3"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -149,6 +150,7 @@ def home():
     return {
         "durum": "aktif",
         "mesaj": "SesAI Sunucusu Çalışıyor!",
+        "surum": SERVER_VERSION,
         "firebase": db is not None,
         "vapi": bool(VAPI_PRIVATE_KEY),
     }
@@ -226,6 +228,54 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
         merge=True,
     )
     return {"success": True, "assistantId": result["id"], "created": not existing_id}
+
+
+# ---------------------------------------------------------------------------
+# Teşhis: uygulamadaki "Sistem Testi" bu ucu çağırır
+# ---------------------------------------------------------------------------
+@app.get("/api/diagnose")
+async def diagnose(authorization: str | None = Header(None)):
+    report: dict = {"sunucuSurumu": SERVER_VERSION, "firebase": db is not None, "vapiAnahtari": bool(VAPI_PRIVATE_KEY)}
+    require_setup()
+    uid = get_uid(authorization)
+    report["girisDogrulandi"] = True
+
+    user = (db.collection("users").document(uid).get().to_dict() or {})
+    report["firestore"] = {
+        "vapiAssistantId": user.get("vapiAssistantId", ""),
+        "assistantVoice": user.get("assistantVoice", ""),
+        "businessName": user.get("businessName", ""),
+        "setupComplete": user.get("setupComplete", False),
+        "assistantUpdatedAt": user.get("assistantUpdatedAt", ""),
+        "phoneStatus": user.get("phoneStatus", ""),
+    }
+
+    aid = user.get("vapiAssistantId")
+    if not aid:
+        report["vapiAsistani"] = "YOK - önce kurulumu tamamlayın"
+        return report
+    try:
+        a = await vapi("GET", f"/assistant/{aid}")
+    except HTTPException as e:
+        report["vapiAsistani"] = f"HATA: {e.detail}"
+        return report
+
+    voice = a.get("voice") or {}
+    voice_name = next((v["name"] for v in VOICES.values() if v["voiceId"] == voice.get("voiceId")), "BILINMEYEN SES")
+    msgs = (a.get("model") or {}).get("messages") or []
+    prompt = next((m.get("content", "") for m in msgs if m.get("role") == "system"), "")
+    report["vapiAsistani"] = {
+        "ad": a.get("name"),
+        "karsilamaCumlesi": a.get("firstMessage"),
+        "karsilamaModu": a.get("firstMessageMode"),
+        "ses": f"{voice_name} ({voice.get('provider')} / {voice.get('model')})",
+        "sesHizi": voice.get("speed"),
+        "model": f"{(a.get('model') or {}).get('provider')} / {(a.get('model') or {}).get('model')}",
+        "transkripsiyon": f"{(a.get('transcriber') or {}).get('provider')} / {(a.get('transcriber') or {}).get('language')}",
+        "talimatIlkSatir": prompt.splitlines()[0] if prompt else "",
+        "sonGuncelleme": a.get("updatedAt"),
+    }
+    return report
 
 
 # ---------------------------------------------------------------------------
