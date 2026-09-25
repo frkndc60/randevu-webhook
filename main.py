@@ -107,7 +107,7 @@ async def vapi(method: str, path: str, body: dict | None = None) -> dict:
 
 
 def build_system_prompt(d: "AssistantRequest", voice_name: str) -> str:
-    return f"""Sen {d.businessName} işletmesinin telefon asistanı {voice_name}'sın.
+    return f"""Sen "{d.businessName}" işletmesinin telefon asistanısın. Adın {voice_name}.
 Her zaman Türkçe, kibar, kısa ve doğal cümlelerle konuş.
 
 İşletme bilgileri:
@@ -116,6 +116,14 @@ Her zaman Türkçe, kibar, kısa ve doğal cümlelerle konuş.
 - Hizmetler: {d.services or "Belirtilmedi"}
 - Çalışma saatleri: {d.workingHours or "Belirtilmedi"}
 - Ek bilgiler: {d.extraInfo or "Yok"}
+
+Konuşma kuralları (ÇOK ÖNEMLİ, yazdığın her şey sesli okunacak):
+- Tüm sayıları, saatleri, tarihleri ve fiyatları RAKAM DEĞİL YAZIYLA yaz.
+  Örnekler: "14:00" yerine "saat on dört", "09:30" yerine "saat dokuz buçuk",
+  "350₺" yerine "üç yüz elli lira", "25 Eylül" yerine "yirmi beş Eylül",
+  "0532 123 45 67" yerine "sıfır beş yüz otuz iki, yüz yirmi üç, kırk beş, altmış yedi".
+- Kısaltma, sembol, emoji, madde işareti ve parantez kullanma. "vb." yerine "ve benzeri" de.
+- Cümlelerin kısa olsun, bir seferde en fazla iki cümle söyle.
 
 Görevlerin:
 1. Arayan kişinin sorularını yukarıdaki bilgilere göre yanıtla. Bilmediğin bir şeyi uydurma;
@@ -185,7 +193,7 @@ async def create_or_update_assistant(d: AssistantRequest, authorization: str | N
 
     body["name"] = f"SesAI - {d.businessName}"[:40]
     body["firstMessage"] = d.greeting.strip() or (
-        f"Merhaba, {d.businessName}'e hoş geldiniz! Ben {voice['name']}. Size nasıl yardımcı olabilirim?"
+        f"Merhaba, {d.businessName}, hoş geldiniz! Ben {voice['name']}. Size nasıl yardımcı olabilirim?"
     )
     body["metadata"] = {"uid": uid}
 
