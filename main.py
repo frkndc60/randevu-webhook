@@ -12,7 +12,9 @@ Render > Settings > Environment kısmına eklenmesi gereken değişkenler:
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import re
+from zoneinfo import ZoneInfo
 
 import firebase_admin
 import httpx
@@ -26,7 +28,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-26.2"
+SERVER_VERSION = "2026-09-26.3"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -55,8 +57,8 @@ BOOK_TOOL = {
             "type": "object",
             "properties": {
                 "customerName": {"type": "string", "description": "Müşterinin adı ve soyadı"},
-                "date": {"type": "string", "description": "Randevu günü, müşterinin söylediği gibi (ör. yarın, 27 Eylül, cuma)"},
-                "time": {"type": "string", "description": "Randevu saati (ör. 15:00, öğleden sonra üç)"},
+                "date": {"type": "string", "description": "Randevu tarihi YYYY-MM-DD biçiminde (ör. 2026-09-27). Yarın, cuma gibi ifadeleri bugünün tarihine göre hesapla."},
+                "time": {"type": "string", "description": "Randevu saati 24 saat HH:MM biçiminde (ör. 15:00). 'Öğleden sonra üç' = 15:00."},
                 "service": {"type": "string", "description": "İstenen hizmet (ör. saç kesimi)"},
                 "phone": {"type": "string", "description": "Müşterinin telefon numarası, verdiyse"},
             },
@@ -147,6 +149,9 @@ def speakable(text: str) -> str:
 def build_system_prompt(d: "AssistantRequest", voice_name: str) -> str:
     return f"""Sen "{speakable(d.businessName)}" işletmesinin telefon asistanısın. Adın {voice_name}.
 Her zaman Türkçe, kibar, kısa ve doğal cümlelerle konuş.
+
+Bugünün tarihi ve saati: {{{{"now" | date: "%d.%m.%Y %A %H:%M", "Europe/Istanbul"}}}}
+(Yarın, cuma, haftaya salı gibi ifadeleri bu tarihe göre hesapla.)
 
 İşletme bilgileri:
 - İşletme adı: {speakable(d.businessName)}
@@ -479,6 +484,117 @@ def find_uid_by_assistant(assistant_id: str | None) -> str | None:
     return docs[0].id if docs else None
 
 
+
+# ---------------------------------------------------------------------------
+# Türkçe tarih / saat çözümleme
+# ---------------------------------------------------------------------------
+TZ = ZoneInfo("Europe/Istanbul")
+TR_MONTHS = {"ocak": 1, "şubat": 2, "subat": 2, "mart": 3, "nisan": 4, "mayıs": 5, "mayis": 5,
+             "haziran": 6, "temmuz": 7, "ağustos": 8, "agustos": 8, "eylül": 9, "eylul": 9,
+             "ekim": 10, "kasım": 11, "kasim": 11, "aralık": 12, "aralik": 12}
+TR_DAYS = {"pazartesi": 0, "salı": 1, "sali": 1, "çarşamba": 2, "carsamba": 2, "perşembe": 3,
+           "persembe": 3, "cuma": 4, "cumartesi": 5, "pazar": 6}
+TR_NUMS = {"sıfır": 0, "bir": 1, "iki": 2, "üç": 3, "uc": 3, "dört": 4, "dort": 4, "beş": 5, "bes": 5,
+           "altı": 6, "alti": 6, "yedi": 7, "sekiz": 8, "dokuz": 9, "on": 10, "yirmi": 20, "otuz": 30,
+           "kırk": 40, "kirk": 40, "elli": 50}
+
+
+def _words_to_int(words: list[str]) -> int | None:
+    total, found = 0, False
+    for w in words:
+        # ekleri at: "üçte" -> "üç", "onda" -> "on", "ikide" -> "iki"
+        key = w if w in TR_NUMS else next((n for n in sorted(TR_NUMS, key=len, reverse=True)
+                                           if w.startswith(n) and len(w) - len(n) <= 3), None)
+        if key is not None:
+            total += TR_NUMS[key]
+            found = True
+        elif found:
+            break
+    return total if found else None
+
+
+def parse_tr_date(text: str, now: datetime) -> datetime | None:
+    t = text.lower().strip()
+    if not t:
+        return None
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", t)
+    if m:
+        return datetime(int(m[1]), int(m[2]), int(m[3]), tzinfo=TZ)
+    m = re.search(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?", t)
+    if m:
+        y = int(m[3]) if m[3] else now.year
+        y = y + 2000 if y < 100 else y
+        return datetime(y, int(m[2]), int(m[1]), tzinfo=TZ)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if "bugün" in t or "bugun" in t:
+        return today
+    if "yarından sonra" in t or "öbür gün" in t or "obur gun" in t:
+        return today + timedelta(days=2)
+    if "yarın" in t or "yarin" in t:
+        return today + timedelta(days=1)
+    for name, num in TR_MONTHS.items():
+        if name in t:
+            dm = re.search(r"(\d{1,2})", t)
+            day = int(dm[1]) if dm else _words_to_int(t.split())
+            if day:
+                d = datetime(now.year, num, day, tzinfo=TZ)
+                return d if d >= today else d.replace(year=now.year + 1)
+    # uzun adlar önce (cumartesi > cuma)
+    for name in sorted(TR_DAYS, key=len, reverse=True):
+        if name in t:
+            delta = (TR_DAYS[name] - today.weekday()) % 7
+            if delta == 0 or "haftaya" in t or "gelecek" in t:
+                delta = delta or 7
+            return today + timedelta(days=delta)
+    return None
+
+
+def parse_tr_time(text: str) -> tuple[int, int] | None:
+    t = text.lower().strip()
+    if not t:
+        return None
+    m = re.search(r"(\d{1,2})[:.](\d{2})", t)
+    if m:
+        h, mi = int(m[1]), int(m[2])
+    else:
+        m = re.search(r"\b(\d{1,2})\b", t)
+        if m:
+            h, mi = int(m[1]), 0
+        else:
+            h = _words_to_int(re.findall(r"\w+", t))
+            if h is None:
+                return None
+            mi = 0
+        if "buçuk" in t or "bucuk" in t:
+            mi = 30
+        elif "çeyrek" in t or "ceyrek" in t:
+            mi = 45 if ("var" in t) else 15
+            if "var" in t:
+                h -= 1
+    pm_words = ("öğleden sonra", "ogleden sonra", "akşam", "aksam", "gece")
+    if any(w in t for w in pm_words) and h < 12:
+        h += 12
+    elif 1 <= h <= 7 and not any(w in t for w in ("sabah", "gece")):
+        h += 12  # iş saatlerinde "üçte" = 15:00
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return h, mi
+
+
+def resolve_appointment(date_text: str, time_text: str) -> datetime | None:
+    now = datetime.now(TZ)
+    d = parse_tr_date(date_text, now) or parse_tr_date(time_text, now)
+    tm = parse_tr_time(time_text) or parse_tr_time(date_text)
+    if not d or not tm:
+        return None
+    return d.replace(hour=tm[0], minute=tm[1])
+
+
+def format_tr(dt: datetime) -> str:
+    days = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+    return f"{dt:%d.%m.%Y} {days[dt.weekday()]} {dt:%H:%M}"
+
+
 def _pick(params: dict, *keys) -> str:
     for k in keys:
         v = params.get(k)
@@ -490,15 +606,20 @@ def _pick(params: dict, *keys) -> str:
 def save_appointment(message: dict, params: dict) -> str:
     print(f"Randevu aracı parametreleri: {json.dumps(params, ensure_ascii=False)}")
     musteri_adi = _pick(params, "customerName", "customer_name", "name", "fullName", "ad", "adSoyad", "musteri")
-    tarih = _pick(params, "appointmentTime", "appointment_time", "datetime", "dateTime", "date_time",
-                  "appointmentDate", "appointment_date", "date", "tarih")
-    saat = _pick(params, "time", "saat", "hour")
-    if saat and saat not in tarih:
-        tarih = f"{tarih} {saat}".strip()
+    tarih_ham = _pick(params, "appointmentTime", "appointment_time", "datetime", "dateTime", "date_time",
+                      "appointmentDate", "appointment_date", "date", "tarih")
+    saat_ham = _pick(params, "time", "saat", "hour")
+    start = resolve_appointment(tarih_ham, saat_ham)
+    tarih = format_tr(start) if start else f"{tarih_ham} {saat_ham}".strip()
     hizmet = _pick(params, "service", "serviceName", "service_name", "hizmet", "islem", "reason", "notes")
     telefon = _pick(params, "phone", "phoneNumber", "phone_number", "telefon")
 
     eksik = [ad for ad, deger in (("müşterinin adı", musteri_adi), ("randevu günü ve saati", tarih)) if not deger]
+    if not eksik and start is None:
+        eksik = ["net randevu günü ve saati (örneğin 27 Eylül saat 15:00)"]
+    if start and start < datetime.now(TZ) - timedelta(minutes=5):
+        return (f"Bu zaman ({tarih}) geçmişte kalıyor, randevu KAYDEDİLMEDİ. "
+                "Müşteriye kibarca ileri bir tarih ve saat sor.")
     if eksik:
         print(f"Randevu eksik bilgi: {eksik}")
         return ("Randevu henüz KAYDEDİLMEDİ çünkü şu bilgi eksik: " + ", ".join(eksik) +
@@ -508,11 +629,18 @@ def save_appointment(message: dict, params: dict) -> str:
     assistant_id = call.get("assistantId") or (message.get("assistant") or {}).get("id")
     uid = find_uid_by_assistant(assistant_id)
     print(f"Yeni Randevu: {musteri_adi} - {tarih} - {hizmet or '-'} (uid: {uid})")
-    if uid and db is not None:
+    if not uid or db is None:
+        print("UYARI: Asistan bir kullanıcıyla eşleşmedi, randevu kaydedilemedi")
+        return ("Kusura bakmayın, randevu sistemine şu an ulaşılamadı. Müşteriden özür dile ve "
+                "işletmenin kendisinin geri dönüş yapacağını söyle.")
+    if True:
         db.collection("users").document(uid).collection("appointments").add(
             {
                 "customerName": musteri_adi,
                 "appointmentTime": tarih,
+                "appointmentStart": start.isoformat() if start else None,
+                "rawDate": tarih_ham,
+                "rawTime": saat_ham,
                 "service": hizmet,
                 "customerPhone": telefon,
                 "callerNumber": (call.get("customer") or {}).get("number", ""),
