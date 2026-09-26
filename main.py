@@ -21,14 +21,14 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from firebase_admin import auth as fb_auth
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, messaging
 from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-26.5"
+SERVER_VERSION = "2026-09-26.6"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -625,6 +625,35 @@ def format_tr(dt: datetime) -> str:
     return f"{dt:%d.%m.%Y} {days[dt.weekday()]} {dt:%H:%M}"
 
 
+def notify_new_appointment(uid: str, name: str, when: str, service: str):
+    """İşletme sahibinin telefonlarına anlık bildirim gönderir (FCM, ücretsiz)."""
+    try:
+        ref = db.collection("users").document(uid)
+        tokens = [t for t in ((ref.get().to_dict() or {}).get("fcmTokens") or []) if t]
+        if not tokens:
+            print("Bildirim: kayıtlı cihaz yok")
+            return
+        msg = messaging.MulticastMessage(
+            tokens=tokens,
+            notification=messaging.Notification(
+                title="📅 Yeni randevu",
+                body=f"{name} • {when}" + (f" • {service}" if service else ""),
+            ),
+            data={"type": "appointment", "customerName": name, "when": when},
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(channel_id="randevular", sound="default"),
+            ),
+        )
+        res = messaging.send_each_for_multicast(msg)
+        bad = [tokens[i] for i, r in enumerate(res.responses) if not r.success]
+        print(f"Bildirim gönderildi: {res.success_count} başarılı, {res.failure_count} başarısız")
+        if bad:
+            ref.update({"fcmTokens": firestore.ArrayRemove(bad)})
+    except Exception as e:
+        print(f"Bildirim hatası: {e}")
+
+
 def _pick(params: dict, *keys) -> str:
     for k in keys:
         v = params.get(k)
@@ -678,6 +707,7 @@ def save_appointment(message: dict, params: dict) -> str:
                 "createdAt": now_iso(),
             }
         )
+    notify_new_appointment(uid, musteri_adi, tarih, hizmet)
     return (f"Randevu başarıyla kaydedildi. Müşteri: {musteri_adi}. Zaman: {tarih}. "
             f"Hizmet: {hizmet or 'belirtilmedi'}. Şimdi müşteriye randevusunun oluşturulduğunu "
             f"kısa ve sıcak bir cümleyle söyle, başka bir isteği olup olmadığını sor.")
