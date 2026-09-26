@@ -28,7 +28,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-26.3"
+SERVER_VERSION = "2026-09-26.5"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -65,7 +65,7 @@ BOOK_TOOL = {
             "required": ["customerName", "date", "time"],
         },
     },
-    "server": {"url": WEBHOOK_URL},
+    "server": {"url": WEBHOOK_URL, "timeoutSeconds": 60},  # sunucu uykudan uyanırken bekle
     "messages": [
         {"type": "request-start", "content": "Hemen kaydınızı oluşturuyorum."},
         {"type": "request-failed", "content": "Kusura bakmayın, sistemde küçük bir sorun oldu, bir daha deneyeyim."},
@@ -101,6 +101,32 @@ else:
     print("UYARI: FIREBASE_SERVICE_ACCOUNT tanımlı değil, Firebase işlemleri çalışmayacak.")
 
 app = FastAPI(title="SesAI Sunucusu")
+
+# ---------------------------------------------------------------------------
+# Uyanık kalma: Render ücretsiz plan 15 dk trafik olmayınca sunucuyu uyutur.
+# Sunucu kendi herkese açık adresini 10 dakikada bir çağırarak uyanık kalır.
+# ---------------------------------------------------------------------------
+import asyncio
+
+SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://randevu-webhook.onrender.com")
+
+
+async def keep_awake():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.get(f"{SELF_URL}/?ping=1")
+        except Exception as e:
+            print(f"Uyanık kalma isteği başarısız: {e}")
+        await asyncio.sleep(10 * 60)
+
+
+@app.on_event("startup")
+async def start_keep_awake():
+    if os.environ.get("RENDER"):  # sadece Render'da çalışsın
+        asyncio.create_task(keep_awake())
+        print(f"Uyanık kalma aktif: {SELF_URL} her 10 dakikada bir çağrılacak")
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +221,10 @@ Görevlerin:
 3. Adı, günü, saati ve hizmeti öğrenince "randevu_olustur" aracını çağır.
    Müşterinin söylediği günü ve saati araca AYNEN ilet, bu bilgileri asla boş bırakma.
    Aracın cevabına göre müşteriye sonucu bildir.
+   ÇOK ÖNEMLİ: Randevunun oluşturulduğunu SADECE araç "Randevu başarıyla kaydedildi" diye
+   cevap verdiyse söyle. Araç hata verdiyse, cevap gelmediyse ya de "KAYDEDİLMEDİ" dediyse
+   ASLA "oluşturdum" deme. Müşteriden özür dile, randevuyu bir kez daha dene; yine olmazsa
+   işletmenin kendisinin geri dönüş yapacağını söyle.
 4. Görüşmeyi nazikçe sonlandır."""
 
 
