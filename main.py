@@ -28,7 +28,7 @@ from pydantic import BaseModel
 # ---------------------------------------------------------------------------
 # Ayarlar
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "2026-09-26.6"
+SERVER_VERSION = "2026-09-26.7"
 VAPI_BASE = "https://api.vapi.ai"
 VAPI_PRIVATE_KEY = os.environ.get("VAPI_PRIVATE_KEY", "")
 TEMPLATE_ASSISTANT_ID = os.environ.get(
@@ -662,6 +662,41 @@ def _pick(params: dict, *keys) -> str:
     return ""
 
 
+DEFAULT_SLOT_MIN = 60          # varsayılan randevu süresi (dakika)
+DEFAULT_OPEN, DEFAULT_CLOSE = 9, 19   # varsayılan çalışma saatleri
+
+
+def busy_slots(uid: str, day: datetime) -> list[tuple[datetime, datetime]]:
+    """O gün iptal edilmemiş randevuların (başlangıç, bitiş) listesi."""
+    out = []
+    for d in db.collection("users").document(uid).collection("appointments").stream():
+        a = d.to_dict() or {}
+        if a.get("status") == "cancelled" or not a.get("appointmentStart"):
+            continue
+        try:
+            st = datetime.fromisoformat(a["appointmentStart"]).astimezone(TZ)
+        except ValueError:
+            continue
+        if st.date() == day.date():
+            dur = int(a.get("durationMin") or DEFAULT_SLOT_MIN)
+            out.append((st, st + timedelta(minutes=dur)))
+    return out
+
+
+def free_suggestions(busy: list, day: datetime, slot: int, around: datetime, n: int = 3) -> list[str]:
+    now = datetime.now(TZ)
+    t = day.replace(hour=DEFAULT_OPEN, minute=0, second=0, microsecond=0)
+    close = day.replace(hour=DEFAULT_CLOSE, minute=0, second=0, microsecond=0)
+    free = []
+    while t + timedelta(minutes=slot) <= close:
+        end = t + timedelta(minutes=slot)
+        if t > now and not any(t < b_end and end > b_st for b_st, b_end in busy):
+            free.append(t)
+        t += timedelta(minutes=30)
+    free.sort(key=lambda x: abs((x - around).total_seconds()))
+    return [f"{x:%H:%M}" for x in sorted(free[:n])]
+
+
 def save_appointment(message: dict, params: dict) -> str:
     print(f"Randevu aracı parametreleri: {json.dumps(params, ensure_ascii=False)}")
     musteri_adi = _pick(params, "customerName", "customer_name", "name", "fullName", "ad", "adSoyad", "musteri")
@@ -687,11 +722,24 @@ def save_appointment(message: dict, params: dict) -> str:
     call = message.get("call") or {}
     assistant_id = call.get("assistantId") or (message.get("assistant") or {}).get("id")
     uid = find_uid_by_assistant(assistant_id)
-    print(f"Yeni Randevu: {musteri_adi} - {tarih} - {hizmet or '-'} (uid: {uid})")
+    print(f"Randevu isteği: {musteri_adi} - {tarih} - {hizmet or '-'} (uid: {uid})")
     if not uid or db is None:
         print("UYARI: Asistan bir kullanıcıyla eşleşmedi, randevu kaydedilemedi")
         return ("Kusura bakmayın, randevu sistemine şu an ulaşılamadı. Müşteriden özür dile ve "
                 "işletmenin kendisinin geri dönüş yapacağını söyle.")
+    slot = int(((db.collection("users").document(uid).get().to_dict() or {}).get("appointmentDurationMin"))
+               or DEFAULT_SLOT_MIN)
+    end = start + timedelta(minutes=slot)
+    busy = busy_slots(uid, start)
+    if any(start < b_end and end > b_st for b_st, b_end in busy):
+        oneriler = free_suggestions(busy, start, slot, start)
+        print(f"Çakışma: {tarih} dolu, öneriler: {oneriler}")
+        if oneriler:
+            return (f"O saat ({tarih}) DOLU, randevu KAYDEDİLMEDİ. Aynı gün boş saatler: "
+                    f"{', '.join(oneriler)}. Bu saatleri müşteriye yazıyla (ör. saat on) öner, "
+                    "hangisini seçerse randevu aracını o saatle tekrar çağır.")
+        return (f"O gün ({start:%d.%m.%Y}) tamamen DOLU, randevu KAYDEDİLMEDİ. "
+                "Müşteriye kibarca başka bir gün öner.")
     if True:
         db.collection("users").document(uid).collection("appointments").add(
             {
@@ -703,10 +751,12 @@ def save_appointment(message: dict, params: dict) -> str:
                 "service": hizmet,
                 "customerPhone": telefon,
                 "callerNumber": (call.get("customer") or {}).get("number", ""),
+                "durationMin": slot,
                 "status": "new",
                 "createdAt": now_iso(),
             }
         )
+    print(f"Yeni Randevu KAYDEDİLDİ: {musteri_adi} - {tarih}")
     notify_new_appointment(uid, musteri_adi, tarih, hizmet)
     return (f"Randevu başarıyla kaydedildi. Müşteri: {musteri_adi}. Zaman: {tarih}. "
             f"Hizmet: {hizmet or 'belirtilmedi'}. Şimdi müşteriye randevusunun oluşturulduğunu "
